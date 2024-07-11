@@ -6,6 +6,8 @@ from io import BytesIO
 from markdown import markdown
 from weasyprint import HTML, CSS
 from dotenv import load_dotenv
+import uuid
+from urllib.parse import quote, unquote
 
 # load .env file to environment
 load_dotenv()
@@ -85,32 +87,38 @@ class Book:
     def __init__(self, book_title, structure):
         self.book_title = book_title
         self.structure = structure
-        self.contents = {title: "" for title in self.flatten_structure(structure)}
-        self.placeholders = {title: st.empty() for title in self.flatten_structure(structure)}
+        # self.contents = {title: "" for title in self.flatten_structure(structure)}
+        # self.placeholders = {title: st.empty() for title in self.flatten_structure(structure)}
+        self.contents = self.initialize_contents(structure)
         st.markdown(f"# {self.book_title}")
-        st.markdown("## Generating the following:")
-        toc_columns = st.columns(4)
-        self.display_toc(self.structure, toc_columns)
-        st.markdown("---")
+        # st.markdown("## Generating the following:")
+        # toc_columns = st.columns(4)
+        # self.display_toc(self.structure, toc_columns)
+        # st.markdown("---")
 
-    def flatten_structure(self, structure):
+    
+    def flatten_structure(self, structure, prefix=""):
         sections = []
         for title, content in structure.items():
-            sections.append(title)
+            full_title = f"{prefix}{title}" if prefix else title
+            sections.append(full_title)
             if isinstance(content, dict):
-                sections.extend(self.flatten_structure(content))
+                sections.extend(self.flatten_structure(content, prefix=f"{full_title} > "))
         return sections
 
-    def update_content(self, title, new_content):
-        try:
-            self.contents[title] += new_content
-            self.display_content(title)
-        except TypeError as e:
-            pass
-
-    def display_content(self, title):
-        if self.contents[title].strip():
-            self.placeholders[title].markdown(f"## {title}\n{self.contents[title]}")
+    # def update_content(self, title, new_content):
+    #     try:
+    #         self.contents[title] += new_content
+    #         self.display_content(title)
+    #     except TypeError as e:
+    #         pass
+    def update_content(self, path, new_content):
+        if path in self.contents:
+            self.contents[path] += new_content
+            
+    # def display_content(self, title):
+    #     if self.contents[title].strip():
+    #         self.placeholders[title].markdown(f"## {title}\n{self.contents[title]}")
 
     def display_structure(self, structure=None, level=1):
         if structure is None:
@@ -139,20 +147,130 @@ class Book:
         if structure is None:
             structure = self.structure
         
-        if level==1:
-            markdown_content = f"# {self.book_title}\n\n"
-            
-        else:
-            markdown_content = ""
+        markdown_content = f"# {self.book_title}\n\n" if level == 1 else ""
         
         for title, content in structure.items():
-            if self.contents[title].strip():  # Only include title if there is content
-                markdown_content += f"{'#' * level} {title}\n{self.contents[title]}\n\n"
+            current_path = f"{title}" if level == 1 else title
+            if self.contents[current_path].strip():  # Only include title if there is content
+                markdown_content += f"{'#' * level} {title}\n{self.contents[current_path]}\n\n"
             if isinstance(content, dict):
                 markdown_content += self.get_markdown_content(content, level + 1)
         return markdown_content
 
+    
+    def initialize_contents(self, structure, path=""):
+        contents = {}
+        for title, content in structure.items():
+            current_path = f"{path}/{title}" if path else title
+            contents[current_path] = ""
+            if isinstance(content, dict):
+                contents.update(self.initialize_contents(content, current_path))
+        return contents
+    
+    def create_sidebar(self):
+        st.sidebar.title(self.book_title)
+        
+        def display_structure(structure, level=0, path=""):
+            for title, content in structure.items():
+                current_path = f"{path}/{title}" if path else title
+                encoded_path = quote(current_path)
+                
+                if isinstance(content, dict):
+                    st.sidebar.markdown(f"{'  ' * level}- **{title}**")
+                    display_structure(content, level + 1, current_path)
+                else:
+                    if st.sidebar.button(f"{'  ' * level}- {title}", key=f"sidebar_{encoded_path}"):
+                        st.experimental_set_query_params(section=encoded_path)
+                        st.session_state.scroll_to_section = encoded_path
+                        st.experimental_rerun()
 
+        display_structure(self.structure)
+    
+    def display_content(self):
+        def render_section(structure, level=2, path=""):
+            for title, content in structure.items():
+                current_path = f"{path}/{title}" if path else title
+                section_id = f"section-{quote(current_path)}"
+                
+                st.markdown(f'<div id="{section_id}"></div>', unsafe_allow_html=True)
+                st.markdown(f'<h{level}>{title}</h{level}>', unsafe_allow_html=True)
+                
+                if self.contents[current_path].strip():
+                    with st.expander("Show/Hide Content", expanded=True):
+                        st.markdown(self.contents[current_path])
+                
+                if isinstance(content, dict):
+                    render_section(content, level + 1, current_path)
+                
+                st.markdown("---")  # Add a separator between sections
+
+        render_section(self.structure)
+
+        # Get the current section from URL parameters or session state
+        query_params = st.experimental_get_query_params()
+        current_section = query_params.get("section", [None])[0] or st.session_state.get("scroll_to_section")
+
+        if current_section:
+            st.markdown(f"""
+                <script>
+                    function attemptScroll() {{
+                        var sectionId = "section-{current_section}";
+                        var element = document.getElementById(sectionId);
+                        if (element) {{
+                            element.scrollIntoView({{behavior: "smooth", block: "start"}});
+                            // Clear the scroll flag from session storage
+                            sessionStorage.removeItem('scrollToSection');
+                            return true;
+                        }}
+                        return false;
+                    }}
+
+                    function scrollWithRetry(maxAttempts = 10, interval = 200) {{
+                        var attempts = 0;
+                        var scrollInterval = setInterval(function() {{
+                            if (attemptScroll() || attempts >= maxAttempts) {{
+                                clearInterval(scrollInterval);
+                            }}
+                            attempts++;
+                        }}, interval);
+                    }}
+
+                    // Set the scroll flag in session storage
+                    sessionStorage.setItem('scrollToSection', '{current_section}');
+
+                    // Attempt to scroll immediately
+                    if (!attemptScroll()) {{
+                        // If immediate scroll fails, start retry mechanism
+                        scrollWithRetry();
+                    }}
+                </script>
+                """, unsafe_allow_html=True)
+            
+            # Clear the scroll flag from session state
+            if hasattr(st.session_state, 'scroll_to_section'):
+                del st.session_state.scroll_to_section
+    
+    def display_download_buttons(self):
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            markdown_file = self.create_markdown_file()
+            st.download_button(
+                label="Download Text",
+                data=markdown_file,
+                file_name=f'{self.book_title}.txt',
+                mime='text/plain'
+            )
+        
+        with col2:
+            pdf_file = self.create_pdf_file()
+            st.download_button(
+                label="Download PDF",
+                data=pdf_file,
+                file_name=f'{self.book_title}.pdf',
+                mime='application/pdf'
+            )
+                    
 def create_markdown_file(content: str) -> BytesIO:
     """
     Create a Markdown file from the provided content.
@@ -341,7 +459,9 @@ def generate_section(prompt: str, additional_instructions: str):
             )
             yield statistics_to_return
 
-
+def navigate_to_section(title):
+    st.session_state.current_section = title
+    
 # Initialize
 if "button_disabled" not in st.session_state:
     st.session_state.button_disabled = False
@@ -354,6 +474,10 @@ if "statistics_text" not in st.session_state:
 
 if 'book_title' not in st.session_state:
     st.session_state.book_title = ""
+
+# Initialize session state variables
+if 'current_section' not in st.session_state:
+    st.session_state.current_section = "Book Generation"
 
 st.write(
     """
@@ -374,143 +498,231 @@ def empty_st():
     st.empty()
 
 
-try:
-    if st.button("End Generation and Download Book"):
-        if "book" in st.session_state:
-            # Create markdown file
-            markdown_file = create_markdown_file(
-                st.session_state.book.get_markdown_content()
-            )
-            st.download_button(
-                label="Download Text",
-                data=markdown_file,
-                file_name=f'{st.session_state.book_title}.txt',
-                mime='text/plain'
-            )
+# Add this function to create the toggle section
+def create_toggle_section():
+    st.sidebar.title("Navigation")
+    sections = ["Book Generation", "Statistics", "About"]
+    st.session_state.current_section = st.sidebar.radio("Go to", sections)
 
-            # Create pdf file (styled)
-            pdf_file = create_pdf_file(st.session_state.book.get_markdown_content())
-            st.download_button(
-                label="Download PDF",
-                data=pdf_file,
-                file_name=f'{st.session_state.book_title}.pdf',
-                mime='application/pdf'
-            )
-        else:
-            raise ValueError("Please generate content first before downloading the book.")
-
-    with st.form("groqform"):
-        if not GROQ_API_KEY:
-            groq_input_key = st.text_input(
-                "Enter your Groq API Key (gsk_yA...):", "", type="password"
-            )
-
-        topic_text = st.text_input(
-            "What do you want the book to be about?",
-            value="",
-            help="Enter the main topic or title of your book",
-        )
-
-        additional_instructions = st.text_area(
-            "Additional Instructions (optional)",
-            help="Provide any specific guidelines or preferences for the book's content",
-            placeholder="E.g., 'Focus on beginner-friendly content', 'Include case studies', etc.",
-            value="",
-        )
-
-        # Generate button
-        submitted = st.form_submit_button(
-            st.session_state.button_text,
-            on_click=disable,
-            disabled=st.session_state.button_disabled,
-        )
-
-        # Statistics
-        placeholder = st.empty()
-
-        def display_statistics():
-            with placeholder.container():
-                if st.session_state.statistics_text:
-                    if (
-                        "Generating structure in background"
-                        not in st.session_state.statistics_text
-                    ):
-                        st.markdown(
-                            st.session_state.statistics_text + "\n\n---\n"
-                        )  # Format with line if showing statistics
-                    else:
-                        st.markdown(st.session_state.statistics_text)
-                else:
-                    placeholder.empty()
-
-        if submitted:
-            if len(topic_text) < 10:
-                raise ValueError("Book topic must be at least 10 characters long")
-
-            st.session_state.button_disabled = True
-            st.session_state.statistics_text = "Generating book title and structure in background...."
-            display_statistics()
-
-            if not GROQ_API_KEY:
-                st.session_state.groq = Groq(api_key=groq_input_key)
-
-            large_model_generation_statistics, book_structure = generate_book_structure(
-                topic_text
-            )
-            # Generate AI book title
-            st.session_state.book_title = generate_book_title(topic_text)
-            st.write(f"## {st.session_state.book_title}")
-
-            large_model_generation_statistics, book_structure = generate_book_structure(topic_text)
-
-            total_generation_statistics = GenerationStatistics(
-                model_name="llama3-8b-8192"
-            )
-
-            try:
-                book_structure_json = json.loads(book_structure)
-                book = Book(st.session_state.book_title, book_structure_json)
-                
-                if 'book' not in st.session_state:
-                    st.session_state.book = book
-
-                # Print the book structure to the terminal to show structure
-                print(json.dumps(book_structure_json, indent=2))
-
-                st.session_state.book.display_structure()
+# Add this function for the About section
+def show_about_section():
+    st.write("""
+    # About Groqbook
     
-                def stream_section_content(sections):
-                    for title, content in sections.items():
-                        if isinstance(content, str):
-                            content_stream = generate_section(
-                                title + ": " + content, additional_instructions
-                            )
-                            for chunk in content_stream:
-                                # Check if GenerationStatistics data is returned instead of str tokens
-                                chunk_data = chunk
-                                if type(chunk_data) == GenerationStatistics:
-                                    total_generation_statistics.add(chunk_data)
+    Groqbook is an AI-powered tool that generates full books using the llama3 (8b and 70b) models on Groq.
+    
+    ## Features:
+    - Generate book titles and structures
+    - Create comprehensive content for each section
+    - Download generated books in markdown or PDF format
+    - View generation statistics
+    
+    ## How to use:
+    1. Enter your Groq API Key
+    2. Provide a book topic and any additional instructions
+    3. Click 'Generate' to start the book creation process
+    4. View statistics and download your book when it's ready
+    
+    For more information, visit [Groq's website](https://groq.com/).
+    """)
 
-                                    st.session_state.statistics_text = str(
-                                        total_generation_statistics
-                                    )
-                                    display_statistics()
+# Create tabs for different sections
+tab1, tab2, tab3 = st.tabs(["Book Generation", "Statistics", "About"])
 
-                                elif chunk != None:
-                                    st.session_state.book.update_content(title, chunk)
-                        elif isinstance(content, dict):
-                            stream_section_content(content)
+with tab1:
+    try:
+        with st.form("groqform"):
+            if not GROQ_API_KEY:
+                groq_input_key = st.text_input(
+                    "Enter your Groq API Key (gsk_yA...):", "", type="password"
+                )   
 
-                stream_section_content(book_structure_json)
+            topic_text = st.text_input(
+                "What do you want the book to be about?",
+                value="",
+                help="Enter the main topic or title of your book",
+            )   
 
-            except json.JSONDecodeError:
-                st.error("Failed to decode the book structure. Please try again.")
+            additional_instructions = st.text_area(
+                "Additional Instructions (optional)",
+                help="Provide any specific guidelines or preferences for the book's content",
+                placeholder="E.g., 'Focus on beginner-friendly content', 'Include case studies', etc.",
+                value="",
+            )   
 
-            enable()
+            # Generate button
+            submitted = st.form_submit_button(
+                st.session_state.button_text,
+                on_click=disable,
+                disabled=st.session_state.button_disabled,
+            )   
 
-except Exception as e:
-    st.session_state.button_disabled = False
-    st.error(e)
+            # Statistics
+            placeholder = st.empty()    
 
-    if st.button("Clear"):
-        st.rerun()
+            def display_statistics():
+                with placeholder.container():
+                    if st.session_state.statistics_text:
+                        if (
+                            "Generating structure in background"
+                            not in st.session_state.statistics_text
+                        ):
+                            st.markdown(
+                                st.session_state.statistics_text + "\n\n---\n"
+                            )  # Format with line if showing statistics
+                        else:
+                            st.markdown(st.session_state.statistics_text)
+                    else:
+                        placeholder.empty() 
+
+            if submitted:
+                if len(topic_text) < 10:
+                    raise ValueError("Book topic must be at least 10 characters long")  
+
+                st.session_state.button_disabled = True
+                st.session_state.statistics_text = "Generating book title and structure in background...."
+                display_statistics()    
+
+                if not GROQ_API_KEY:
+                    st.session_state.groq = Groq(api_key=groq_input_key)    
+
+                large_model_generation_statistics, book_structure = generate_book_structure(
+                    topic_text
+                )
+                # Generate AI book title
+                st.session_state.book_title = generate_book_title(topic_text)
+                st.write(f"## {st.session_state.book_title}")   
+
+                large_model_generation_statistics, book_structure = generate_book_structure(topic_text) 
+
+                total_generation_statistics = GenerationStatistics(
+                    model_name="llama3-8b-8192"
+                )   
+                
+                try:
+                    book_structure_json = json.loads(book_structure)
+                    book = Book(st.session_state.book_title, book_structure_json)
+
+                    if 'book' not in st.session_state:
+                        st.session_state.book = book    
+                    
+                    # Print the book structure to the terminal to show structure
+                    print(json.dumps(book_structure_json, indent=2))    
+
+                    st.session_state.book.create_sidebar()
+                    st.session_state.book.display_content()
+                    
+                    # def stream_section_content(sections):
+                    #     for title, content in sections.items():
+                    #         if isinstance(content, str):
+                    #             content_stream = generate_section(
+                    #                 title + ": " + content, additional_instructions
+                    #             )
+                    #             for chunk in content_stream:
+                    #                 # Check if GenerationStatistics data is returned instead of str tokens
+                    #                 chunk_data = chunk
+                    #                 if type(chunk_data) == GenerationStatistics:
+                    #                     total_generation_statistics.add(chunk_data) 
+
+                    #                     st.session_state.statistics_text = str(
+                    #                         total_generation_statistics
+                    #                     )
+                    #                     display_statistics()    
+
+                    #                 elif chunk != None:
+                    #                     st.session_state.book.update_content(title, chunk)
+                    #         elif isinstance(content, dict):
+                    #             stream_section_content(content) 
+                    def stream_section_content(sections, path=""):
+                        for title, content in sections.items():
+                            current_path = f"{path}/{title}" if path else title
+                            if isinstance(content, str):
+                                content_stream = generate_section(
+                                    title + ": " + content, additional_instructions
+                                )
+                                for chunk in content_stream:
+                                    if isinstance(chunk, GenerationStatistics):
+                                        total_generation_statistics.add(chunk)
+                                        st.session_state.statistics_text = str(total_generation_statistics)
+                                        display_statistics()
+                                    elif chunk is not None:
+                                        st.session_state.book.update_content(current_path, chunk)
+                            elif isinstance(content, dict):
+                                stream_section_content(content, current_path)
+
+                    st.write("Debug: Starting content generation")
+                    stream_section_content(book_structure_json)
+                    st.write("Debug: Content generation completed")
+            
+                    st.session_state.book.create_sidebar()
+                    st.session_state.book.display_content()
+                    
+                except json.JSONDecodeError:
+                    st.error("Failed to decode the book structure. Please try again.")  
+
+                enable()
+                    
+        if st.button("End Generation and Download Book"):
+            if "book" in st.session_state:
+                # Create markdown file
+                st.write(str(st.session_state.book.get_markdown_content()))
+                
+                markdown_file = create_markdown_file(
+                    st.session_state.book.get_markdown_content()
+                )
+                st.download_button(
+                    label="Download Text",
+                    data=markdown_file,
+                    file_name=f'{st.session_state.book_title}.txt',
+                    mime='text/plain'
+                )   
+
+                # # Create pdf file (styled)
+                # pdf_file = create_pdf_file(st.session_state.book.get_markdown_content())
+                # st.download_button(
+                #     label="Download PDF",
+                #     data=pdf_file,
+                #     file_name=f'{st.session_state.book_title}.pdf',
+                #     mime='application/pdf'
+                # )
+            else:
+                raise ValueError("Please generate content first before downloadin the  book.")  
+
+    except Exception as e:
+        st.session_state.button_disabled = False
+        st.error(e) 
+
+        if st.button("Clear"):
+            st.rerun()
+
+with tab2:
+    st.write("# Generation Statistics")
+    if "statistics_text" in st.session_state and st.session_state.statistics_text:
+        st.markdown(st.session_state.statistics_text)
+    else:
+        st.write("No statistics available. Generate a book to see statistics.")
+
+with tab3:
+    show_about_section()
+
+# At the end of the script, add:
+if 'book' in st.session_state:
+    st.session_state.book.create_sidebar()
+    st.session_state.book.display_content()
+    
+    
+st.markdown("""
+    <script>
+        // Check if we need to scroll on page load
+        window.addEventListener('load', function() {
+            var scrollToSection = sessionStorage.getItem('scrollToSection');
+            if (scrollToSection) {
+                var element = document.getElementById("section-" + scrollToSection);
+                if (element) {
+                    element.scrollIntoView({behavior: "smooth", block: "start"});
+                    sessionStorage.removeItem('scrollToSection');
+                }
+            }
+        });
+    </script>
+    """, unsafe_allow_html=True)
